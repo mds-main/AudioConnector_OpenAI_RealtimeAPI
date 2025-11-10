@@ -80,13 +80,7 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_MAX_OUTPUT_TOKENS = "inf"
 
 ENDING_PROMPT = os.getenv('ENDING_PROMPT', """
-Please analyze this conversation and provide a structured summary including:
-{
-    "main_topics": [],
-    "key_decisions": [],
-    "action_items": [],
-    "sentiment": ""
-}
+Provide a brief 2-3 sentence summary of this conversation. Include: the main topic discussed, what was accomplished or decided, and the outcome. Keep it concise and factual.
 """)
 
 ENDING_TEMPERATURE = float(os.getenv('ENDING_TEMPERATURE', '0.2'))

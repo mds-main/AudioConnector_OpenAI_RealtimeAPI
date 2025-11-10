@@ -626,20 +626,17 @@ class AudioHookServer:
                 data = await self.openai_client.await_summary(timeout=10)
                 if data:
                     summary = data.get("response", {}).get("output", [{}])[0].get("text")
-                # Parse JSON summary
+                # Return compact text summary (not JSON)
                 if summary:
-                    try:
-                        summary_dict = json.loads(summary)
-                        return summary_dict
-                    except json.JSONDecodeError:
-                        self.logger.error("Failed to parse summary JSON")
-                        return {"error": "Failed to parse summary"}
+                    return summary.strip()
+                else:
+                    return None
             except asyncio.TimeoutError:
                 self.logger.error("Timeout generating session summary")
-                return {"error": "Timeout generating summary"}
+                return None
         except Exception as e:
             self.logger.error(f"Error generating session summary: {e}")
-            return {"error": str(e)}
+            return None
 
     async def handle_close(self, msg: dict):
         """
@@ -750,7 +747,7 @@ class AudioHookServer:
                     self.logger.info(f"[FunctionCall] Token usage (OpenAI): {token_metrics}")
 
             output_vars = {
-                "CONVERSATION_SUMMARY": json.dumps(summary_data) if summary_data else "",
+                "CONVERSATION_SUMMARY": summary_data if summary_data else "",
                 "CONVERSATION_DURATION": str(time.time() - self.start_time),
                 **token_metrics
             }
