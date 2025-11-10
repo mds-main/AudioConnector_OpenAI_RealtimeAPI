@@ -159,6 +159,10 @@ class GeminiLiveClient:
         self._pending_function_calls: Dict[str, Dict[str, Any]] = {}
         self._turn_complete = False
 
+        # Custom farewell prompts
+        self.escalation_prompt = None
+        self.success_prompt = None
+
     async def terminate_session(self, reason="completed", final_message=None):
         """
         Terminate the Gemini session gracefully.
@@ -619,7 +623,13 @@ class GeminiLiveClient:
                 output_payload = {"result": "ok", "action": action, "summary": summary}
                 self._disconnect_context = {"action": action, "reason": "completed", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
+                # Use custom SUCCESS_PROMPT if provided, otherwise use default
+                if self.success_prompt:
+                    # Make instruction explicit and unambiguous - speak these exact words
+                    closing_instruction = f"You must now say this exact farewell message word-for-word to the caller (do not paraphrase or add anything): {self.success_prompt}"
+                    self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
+                else:
+                    closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
 
             elif name in ("handoff_to_human", "end_conversation_with_escalation"):
                 action = "end_conversation_with_escalation"
@@ -628,7 +638,13 @@ class GeminiLiveClient:
                 info = reason
                 self._disconnect_context = {"action": action, "reason": "transfer", "info": info}
                 self._await_disconnect_on_done = True
-                closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
+                # Use custom ESCALATION_PROMPT if provided, otherwise use default
+                if self.escalation_prompt:
+                    # Make instruction explicit and unambiguous - speak these exact words
+                    closing_instruction = f"You must now say this exact transfer message word-for-word to the caller (do not paraphrase or add anything): {self.escalation_prompt}"
+                    self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
+                else:
+                    closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
 
             else:
                 self.logger.warning(f"[FunctionCall] Unknown function called: {name}. Sending error response.")

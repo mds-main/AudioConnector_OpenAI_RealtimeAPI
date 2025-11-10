@@ -497,7 +497,8 @@ class GeminiRealtimeClient:
                 self._await_disconnect_on_done = True
                 # Use custom SUCCESS_PROMPT if provided, otherwise use default
                 if self.success_prompt:
-                    closing_instruction = f'Say exactly this to the caller: "{self.success_prompt}"'
+                    # Make instruction explicit and unambiguous - speak these exact words
+                    closing_instruction = f"You must now say this exact farewell message word-for-word to the caller (do not paraphrase or add anything): {self.success_prompt}"
                     self.logger.info(f"[FunctionCall] Using custom SUCCESS_PROMPT for closing: {self.success_prompt}")
                 else:
                     closing_instruction = "Confirm the task is wrapped up and thank the caller in one short sentence."
@@ -510,7 +511,8 @@ class GeminiRealtimeClient:
                 self._await_disconnect_on_done = True
                 # Use custom ESCALATION_PROMPT if provided, otherwise use default
                 if self.escalation_prompt:
-                    closing_instruction = f'Say exactly this to the caller: "{self.escalation_prompt}"'
+                    # Make instruction explicit and unambiguous - speak these exact words
+                    closing_instruction = f"You must now say this exact transfer message word-for-word to the caller (do not paraphrase or add anything): {self.escalation_prompt}"
                     self.logger.info(f"[FunctionCall] Using custom ESCALATION_PROMPT for closing: {self.escalation_prompt}")
                 else:
                     closing_instruction = "Let the caller know a live agent will take over and reassure them help is coming."
@@ -534,10 +536,20 @@ class GeminiRealtimeClient:
 
             self.logger.info(f"[FunctionCall] Sent function response for {name}")
 
+            # Send farewell/escalation message instruction to Gemini
             if closing_instruction and self._disconnect_context:
                 self.logger.info(
-                    f"[FunctionCall] Scheduled disconnect after farewell: action={self._disconnect_context.get('action')}"
+                    f"[FunctionCall] Sending farewell instruction to Gemini: action={self._disconnect_context.get('action')}"
                 )
+                # Send the closing instruction as a user turn so Gemini generates the farewell audio
+                await self.session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text=closing_instruction)]
+                    ),
+                    turn_complete=True
+                )
+                self.logger.info(f"[FunctionCall] Farewell instruction sent, scheduled disconnect after audio completes")
 
         except Exception as e:
             self.logger.error(f"[FunctionCall] ERROR: Exception handling function call {name}: {e}", exc_info=True)

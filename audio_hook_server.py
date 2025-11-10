@@ -705,16 +705,19 @@ class AudioHookServer:
             await self.stop_audio_processing()
             self.logger.info(f"[FunctionCall] Audio processing stopped")
 
-            # Generate summary only if we don't have outcome data from function calls
+            # ALWAYS generate conversation summary before disconnect (required output variable)
             summary_data = None
-            outcome = self.session_outcome or {}
-            has_outcome_data = outcome.get("escalation_required") or outcome.get("completion_summary")
-            
-            if not has_outcome_data and self.openai_client:
+            if self.openai_client:
                 self.logger.info(f"[FunctionCall] Generating conversation summary before disconnect")
-                summary_data = await self.generate_session_summary()
-            elif has_outcome_data:
-                self.logger.info(f"[FunctionCall] Skipping summary generation - already have outcome data from function call")
+                try:
+                    summary_data = await self.generate_session_summary()
+                    if summary_data:
+                        self.logger.info(f"[FunctionCall] Conversation summary generated successfully")
+                    else:
+                        self.logger.warning(f"[FunctionCall] Conversation summary generation returned None")
+                except Exception as e:
+                    self.logger.error(f"[FunctionCall] Failed to generate conversation summary: {e}", exc_info=True)
+                    summary_data = None
             
             # Close OpenAI connection after summary (if generated) and audio buffer has drained
             if self.openai_client:
