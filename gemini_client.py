@@ -469,7 +469,9 @@ class GeminiRealtimeClient:
             config_dict["max_output_tokens"] = self.max_output_tokens
 
         # Add tools if we have function declarations
-        # Following Gemini docs: tools = [{"function_declarations": [...]}]
+        # Following Gemini docs: tools = [{"function_declarations": [...]}, {"google_search": {}}]
+        # Note: Adding google_search alongside function declarations has been reported to improve
+        # function calling reliability (workaround from GitHub community)
         if function_declarations:
             # Convert dict declarations to typed FunctionDeclaration objects
             typed_declarations = []
@@ -481,11 +483,16 @@ class GeminiRealtimeClient:
                 )
                 typed_declarations.append(typed_decl)
 
-            # Wrap in Tool object
-            config_dict["tools"] = [types.Tool(function_declarations=typed_declarations)]
+            # Wrap in Tool objects - include both function declarations and google_search
+            # This combination has been reported to improve function calling reliability
+            config_dict["tools"] = [
+                types.Tool(function_declarations=typed_declarations),
+                types.Tool(google_search=types.GoogleSearch())
+            ]
 
             self.logger.info(
-                f"[FunctionCall] Configured {len(typed_declarations)} function declarations for Gemini"
+                f"[FunctionCall] Configured {len(typed_declarations)} function declarations for Gemini "
+                f"(with google_search grounding workaround)"
             )
 
         return types.LiveConnectConfig(**config_dict)
