@@ -127,6 +127,13 @@ class GeminiRealtimeClient:
         self._last_audio_time = 0.0
         self._vad_monitor_task = None
 
+        # Function calling support - transcription bridging
+        self._activity_started = False
+        self._accumulated_transcription = ""
+        self._last_transcription_time = 0.0
+        self._speech_end_check_task = None
+        self._pending_function_evaluation = False
+
         # Audio output buffering (Gemini PCM16 24kHz -> Genesys PCMU 8kHz)
         self._on_audio_callback = None
         self._pending_pcmu_bytes = bytearray()
@@ -442,14 +449,16 @@ class GeminiRealtimeClient:
             )
         )
 
-        # VAD configuration - using automatic mode as per Gemini docs
+        # VAD configuration - DISABLE automatic mode for function calling support
+        # With automatic VAD, Gemini responds immediately without evaluating function calls
+        # We need manual control to bridge transcriptions to send_client_content()
         realtime_input_config = types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
-                disabled=False,  # Use Gemini's automatic VAD
+                disabled=True,  # Disable automatic VAD for function calling
                 start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
                 prefix_padding_ms=20,
-                silence_duration_ms=900  # ~1 second as per docs
+                silence_duration_ms=900
             )
         )
 
@@ -494,8 +503,11 @@ class GeminiRealtimeClient:
         """
         Send audio from Genesys (PCMU 8kHz) to Gemini (PCM16 16kHz).
 
-        Following Gemini docs pattern:
-        session.sendRealtimeInput({ audio: { data: base64Audio, mimeType: "audio/pcm;rate=16000" } })
+        Following Gemini docs pattern with manual VAD for function calling:
+        1. Send activity_start when speech begins
+        2. Stream audio via send_realtime_input()
+        3. Send activity_end when speech ends (detected by silence)
+        4. Bridge transcription to send_client_content() for function calling
         """
         if not self.running or self.session is None:
             return
@@ -512,12 +524,17 @@ class GeminiRealtimeClient:
 
             if is_silence:
                 self._consecutive_silence_frames += 1
-                # Flush stream after ~1 second of silence
+                # After ~1 second of silence, end activity and trigger function evaluation
                 if self._consecutive_silence_frames >= VAD_SILENCE_THRESHOLD_FRAMES:
-                    await self._flush_audio_stream()
-                    return  # Don't send silence frames after flush
+                    await self._handle_speech_end()
+                    return  # Don't send silence frames after speech ends
             else:
                 self._consecutive_silence_frames = 0
+
+                # Start activity on first non-silence audio
+                if not self._activity_started:
+                    await self._start_activity()
+
                 # Open audio stream if closed
                 if not self._audio_stream_open:
                     self._audio_stream_open = True
@@ -555,6 +572,99 @@ class GeminiRealtimeClient:
             return max_amplitude < PCM16_SILENCE_FLOOR
         except:
             return False
+
+    async def _start_activity(self):
+        """
+        Signal start of user speech activity.
+
+        With manual VAD, we must explicitly tell Gemini when user starts speaking.
+        """
+        if self._activity_started or not self.session:
+            return
+
+        try:
+            await self.session.send_realtime_input(activity_start=types.ActivityStart())
+            self._activity_started = True
+            self._accumulated_transcription = ""
+            self._last_transcription_time = time.monotonic()
+            self.logger.info("[FunctionCall] Activity started - user speaking")
+
+        except Exception as e:
+            self.logger.error(f"Error starting activity: {e}", exc_info=True)
+
+    async def _handle_speech_end(self):
+        """
+        Handle end of user speech - critical for function calling!
+
+        This is where we bridge from send_realtime_input() to send_client_content():
+        1. Send activity_end to Gemini
+        2. Wait briefly for any final transcription updates
+        3. Send accumulated transcription via send_client_content()
+        4. This triggers function calling evaluation
+        """
+        if not self._activity_started or not self.session:
+            return
+
+        try:
+            # Send activity_end signal
+            await self.session.send_realtime_input(activity_end=types.ActivityEnd())
+            self.logger.info("[FunctionCall] Activity ended - user stopped speaking")
+
+            # Flush audio stream
+            await self._flush_audio_stream()
+
+            # Wait briefly for any final transcription updates
+            await asyncio.sleep(0.3)
+
+            # Bridge transcription to send_client_content() for function calling
+            if self._accumulated_transcription.strip():
+                await self._send_transcription_for_function_calling(
+                    self._accumulated_transcription.strip()
+                )
+
+            # Reset activity state
+            self._activity_started = False
+            self._accumulated_transcription = ""
+
+        except Exception as e:
+            self.logger.error(f"Error handling speech end: {e}", exc_info=True)
+
+    async def _send_transcription_for_function_calling(self, transcription: str):
+        """
+        Send transcription via send_client_content() to trigger function calling evaluation.
+
+        This is the KEY to making function calling work with Gemini!
+
+        Gemini's send_realtime_input() path doesn't evaluate function calls.
+        We must send the transcription via send_client_content() to trigger
+        function calling evaluation.
+        """
+        if not self.session or not transcription:
+            return
+
+        try:
+            self.logger.info(
+                f"[FunctionCall] Sending transcription for function evaluation: '{transcription}'"
+            )
+
+            # Send as user message via send_client_content()
+            # This triggers Gemini to evaluate for function calling
+            await self.session.send_client_content(
+                turns=types.Content(
+                    role="user",
+                    parts=[types.Part(text=transcription)]
+                ),
+                turn_complete=True
+            )
+
+            self._pending_function_evaluation = True
+            self.logger.debug("[FunctionCall] Transcription sent, awaiting function evaluation")
+
+        except Exception as e:
+            self.logger.error(
+                f"[FunctionCall] Error sending transcription for function calling: {e}",
+                exc_info=True
+            )
 
     async def _flush_audio_stream(self):
         """Flush audio stream when user stops speaking (as per Gemini docs)."""
@@ -677,14 +787,20 @@ class GeminiRealtimeClient:
         - Turn completion
         - Model turns (containing function calls)
         - Interruptions
-        - Transcriptions
+        - Transcriptions (accumulate for function calling)
         """
         try:
-            # Log transcriptions
+            # Accumulate input transcriptions for function calling
             if hasattr(server_content, 'input_transcription'):
                 transcript = server_content.input_transcription
                 if transcript and hasattr(transcript, 'text') and transcript.text:
+                    # Accumulate transcription text
+                    self._accumulated_transcription += transcript.text
+                    self._last_transcription_time = time.monotonic()
                     self.logger.info(f"[Gemini] Input: '{transcript.text}'")
+                    self.logger.debug(
+                        f"[FunctionCall] Accumulated: '{self._accumulated_transcription}'"
+                    )
 
             if hasattr(server_content, 'output_transcription'):
                 transcript = server_content.output_transcription
@@ -694,6 +810,7 @@ class GeminiRealtimeClient:
             # Handle turn complete
             if server_content.turn_complete:
                 self._response_in_progress = False
+                self._pending_function_evaluation = False
                 self.logger.info("[FunctionCall] Turn complete from Gemini")
 
                 # Flush any remaining audio
@@ -718,6 +835,12 @@ class GeminiRealtimeClient:
             if hasattr(server_content, 'interrupted') and server_content.interrupted:
                 self.logger.info("[Gemini] Generation interrupted")
                 self._pending_pcmu_bytes.clear()
+
+                # Reset activity state on interruption
+                # User is interrupting, so we need to start fresh
+                self._activity_started = False
+                self._accumulated_transcription = ""
+                self._pending_function_evaluation = False
 
         except Exception as e:
             self.logger.error(f"Error processing server content: {e}", exc_info=True)
@@ -1157,6 +1280,14 @@ class GeminiRealtimeClient:
             except asyncio.CancelledError:
                 pass
             self._vad_monitor_task = None
+
+        if self._speech_end_check_task:
+            self._speech_end_check_task.cancel()
+            try:
+                await self._speech_end_check_task
+            except asyncio.CancelledError:
+                pass
+            self._speech_end_check_task = None
 
         if self.read_task:
             self.read_task.cancel()
